@@ -24,7 +24,7 @@ DATABASE_URL = os.getenv(
     f"sqlite:///{DATABASE_PATH.as_posix()}",
 )
 
-
+"""Getting database location for logging purposes."""
 def get_database_location() -> str:
     """Return a readable database location for pipeline logging."""
     if DATABASE_URL.startswith("sqlite:///"):

@@ -38,6 +38,7 @@ def extract_stock_data(
             "and internet connection."
         )
 
+    # Ensures each row has a Ticker column for consistent processing in later stages by adding a Ticker column when only one ticker is requested.
     # yfinance uses flat columns when only one ticker is requested.
     if not isinstance(raw_data.columns, pd.MultiIndex):
         raw_data = raw_data.copy()

@@ -19,7 +19,7 @@ OUTPUT_COLUMNS = [
 
 YFINANCE_FIELDS = {"Open", "High", "Low", "Close", "Adj Close", "Volume"}
 
-
+# Handles multi-ticker data with MultiIndex columns, converting to long format
 def _convert_multi_index_data(raw_data: pd.DataFrame) -> pd.DataFrame:
     """Convert either yfinance MultiIndex layout into a long DataFrame."""
     first_level = set(raw_data.columns.get_level_values(0))
@@ -35,7 +35,7 @@ def _convert_multi_index_data(raw_data: pd.DataFrame) -> pd.DataFrame:
 
     return pd.concat(frames, ignore_index=True)
 
-
+# Handles single-ticker flat data, ensuring ticker column exists
 def _convert_flat_data(raw_data: pd.DataFrame) -> pd.DataFrame:
     """Convert single-ticker yfinance data into a regular DataFrame."""
     flat_data = raw_data.copy()
@@ -46,7 +46,7 @@ def _convert_flat_data(raw_data: pd.DataFrame) -> pd.DataFrame:
         )
     return flat_data.reset_index()
 
-
+# Main transformation function that cleans raw stock data and calculates daily returns
 def transform_stock_data(raw_data: pd.DataFrame) -> pd.DataFrame:
     """Clean raw stock data and calculate daily returns per ticker."""
     if raw_data.empty:
