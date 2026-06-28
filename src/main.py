@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Add parent directory to path so 'src' module is discoverable
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from src.config import (
     DATABASE_URL,
     INTERVAL,
