@@ -10,6 +10,11 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 
+# Pipeline outputs (keep directory structure via .gitkeep)
+logs/*.log
+logs/*.log.*
+reports/*.json
+
 # Editor and operating system files
 .vscode/
 .idea/

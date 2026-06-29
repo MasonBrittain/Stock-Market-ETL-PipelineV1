@@ -21,17 +21,24 @@ def _valid_stock_data() -> pd.DataFrame:
     )
 
 
-def test_duplicate_ticker_and_price_date_is_rejected() -> None:
+def test_duplicate_ticker_and_price_date_is_flagged_as_warning() -> None:
+    # In V2, duplicate rows are a non-critical check — they are flagged in the
+    # quality report but do not abort the pipeline with a ValueError.
     stock_data = _valid_stock_data()
     stock_data.loc[1, "ticker"] = "AAPL"
 
-    with pytest.raises(ValueError, match="duplicate ticker and price_date"):
-        run_quality_checks(stock_data)
+    results = run_quality_checks(stock_data)
+
+    assert results["checks"]["duplicate_rows"]["passed"] is False
+    assert results["checks"]["duplicate_rows"]["failures"] == 2
+    # overall_passed is False because a check failed, but no exception is raised
+    assert results["overall_passed"] is False
 
 
-def test_negative_price_is_rejected() -> None:
+def test_negative_price_raises_critical_error() -> None:
+    # negative_prices is a CRITICAL check — it raises ValueError.
     stock_data = _valid_stock_data()
     stock_data.loc[0, "close_price"] = -1.0
 
-    with pytest.raises(ValueError, match="negative prices"):
+    with pytest.raises(ValueError, match="Critical quality checks failed"):
         run_quality_checks(stock_data)

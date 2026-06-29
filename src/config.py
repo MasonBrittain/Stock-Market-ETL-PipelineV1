@@ -10,23 +10,31 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
 
+# --- Tickers and data window ---
 TICKERS = [
     ticker.strip().upper()
     for ticker in os.getenv("TICKERS", "AAPL,MSFT,NVDA,GOOGL,AMZN").split(",")
     if ticker.strip()
 ]
-PERIOD = os.getenv("PERIOD", "6mo")
 INTERVAL = os.getenv("INTERVAL", "1d")
+# Maximum calendar days to look back when a ticker has no stored data yet.
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "730"))
 
+# --- Storage ---
 DATABASE_PATH = PROJECT_ROOT / "data" / "stock_market.db"
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     f"sqlite:///{DATABASE_PATH.as_posix()}",
 )
 
-"""Getting database location for logging purposes."""
+# --- Logging ---
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_DIR = PROJECT_ROOT / os.getenv("LOG_DIR", "logs")
+REPORTS_DIR = PROJECT_ROOT / os.getenv("REPORTS_DIR", "reports")
+
+
 def get_database_location() -> str:
-    """Return a readable database location for pipeline logging."""
+    """Return a human-readable database location for pipeline logging."""
     if DATABASE_URL.startswith("sqlite:///"):
         database_value = DATABASE_URL.removeprefix("sqlite:///")
         database_path = Path(database_value)
