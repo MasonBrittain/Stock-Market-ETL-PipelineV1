@@ -1,55 +1,36 @@
-"""Load transformed stock price data into SQLite with duplicate prevention."""
+"""Load transformed stock price data into the fact_stock_prices table.
+
+V2 change: accepts a shared Engine (created once in main.py) and enriches each
+row with company_id, date_id, and batch_id before inserting.  Duplicate rows
+(same ticker + price_date already stored) are silently skipped.
+"""
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
-from sqlalchemy import (
-    BigInteger,
-    Column,
-    DateTime,
-    Float,
-    MetaData,
-    String,
-    Table,
-    UniqueConstraint,
-    create_engine,
-    select,
-)
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
-TABLE_NAME = "fact_stock_prices"
+from src.database import fact_stock_prices_table
+
+logger = logging.getLogger(__name__)
 
 
-def _create_stock_prices_table(engine: Engine) -> Table:
-    """Create the target table when it does not already exist."""
-    metadata = MetaData()
-    table = Table(
-        TABLE_NAME,
-        metadata,
-        Column("ticker", String(10), nullable=False),
-        Column("price_date", DateTime, nullable=False),
-        Column("open_price", Float),
-        Column("high_price", Float),
-        Column("low_price", Float),
-        Column("close_price", Float),
-        Column("adj_close_price", Float),
-        Column("volume", BigInteger),
-        Column("daily_return", Float),
-        Column("loaded_at", DateTime, nullable=False),
-        UniqueConstraint("ticker", "price_date", name="uq_stock_ticker_price_date"),
-    )
-    metadata.create_all(engine)
-    return table
-
-
-def _existing_keys(engine: Engine, table: Table, tickers: list[str]) -> set[tuple[str, pd.Timestamp]]:
-    """Read existing ticker/date keys for the current batch."""
+def _get_existing_keys(
+    engine: Engine,
+    tickers: list[str],
+) -> set[tuple[str, pd.Timestamp]]:
+    """Read (ticker, price_date) pairs already stored for the given tickers."""
     if not tickers:
         return set()
 
-    query = select(table.c.ticker, table.c.price_date).where(
-        table.c.ticker.in_(tickers)
-    )
+    query = select(
+        fact_stock_prices_table.c.ticker,
+        fact_stock_prices_table.c.price_date,
+    ).where(fact_stock_prices_table.c.ticker.in_(tickers))
+
     existing = pd.read_sql(query, engine)
     if existing.empty:
         return set()
@@ -58,43 +39,59 @@ def _existing_keys(engine: Engine, table: Table, tickers: list[str]) -> set[tupl
     return set(existing.itertuples(index=False, name=None))
 
 
-def load_stock_data(stock_data: pd.DataFrame, database_url: str) -> int:
-    """Append only new ticker/date records and return the inserted row count."""
+def load_stock_data(
+    stock_data: pd.DataFrame,
+    engine: Engine,
+    company_id_map: dict[str, int],
+    batch_id: str,
+) -> tuple[int, int]:
+    """Append only new ticker/date records to fact_stock_prices.
+
+    Args:
+        stock_data: Transformed DataFrame from transform_stock_data().
+        engine: Shared SQLAlchemy engine (schema must already be initialised).
+        company_id_map: Maps ticker symbol → dim_company.company_id.
+        batch_id: UUID for this pipeline run, written to every inserted row.
+
+    Returns:
+        (rows_inserted, rows_skipped) counts.
+    """
     if stock_data.empty:
-        return 0
+        logger.info("No rows to load — DataFrame is empty")
+        return 0, 0
 
-    engine = create_engine(database_url)
-    try:
-        table = _create_stock_prices_table(engine)
-        rows_to_load = stock_data.copy()
-        rows_to_load["price_date"] = pd.to_datetime(
-            rows_to_load["price_date"]
-        ).dt.normalize()
-        rows_to_load = rows_to_load.drop_duplicates(
-            subset=["ticker", "price_date"], keep="last"
-        )
+    rows = stock_data.copy()
 
-        existing = _existing_keys(
-            engine,
-            table,
-            rows_to_load["ticker"].dropna().unique().tolist(),
-        )
-        is_new = [
-            (row.ticker, row.price_date) not in existing
-            for row in rows_to_load[["ticker", "price_date"]].itertuples(index=False)
-        ]
-        rows_to_load = rows_to_load.loc[is_new]
+    # Enrich with dimension foreign keys
+    rows["company_id"] = rows["ticker"].map(company_id_map)
+    rows["date_id"] = pd.to_datetime(rows["price_date"]).dt.strftime("%Y%m%d").astype(int)
+    rows["batch_id"] = batch_id
 
-        if rows_to_load.empty:
-            return 0
+    rows["price_date"] = pd.to_datetime(rows["price_date"]).dt.normalize()
+    rows = rows.drop_duplicates(subset=["ticker", "price_date"], keep="last")
 
-        rows_to_load.to_sql(
-            TABLE_NAME,
-            engine,
-            if_exists="append",
-            index=False,
-            method="multi",
-        )
-        return len(rows_to_load)
-    finally:
-        engine.dispose()
+    existing = _get_existing_keys(
+        engine,
+        rows["ticker"].dropna().unique().tolist(),
+    )
+
+    is_new = [
+        (row.ticker, row.price_date) not in existing
+        for row in rows[["ticker", "price_date"]].itertuples(index=False)
+    ]
+    new_rows = rows.loc[is_new]
+    skipped = len(rows) - len(new_rows)
+
+    if new_rows.empty:
+        logger.info("All %d rows already exist in the database — nothing to insert", skipped)
+        return 0, skipped
+
+    new_rows.to_sql(
+        "fact_stock_prices",
+        engine,
+        if_exists="append",
+        index=False,
+        method="multi",
+    )
+    logger.info("Inserted %d rows | skipped %d existing rows", len(new_rows), skipped)
+    return len(new_rows), skipped

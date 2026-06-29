@@ -1,47 +1,127 @@
-"""Extract historical daily stock prices from Yahoo Finance."""
+"""Extract historical daily stock prices from Yahoo Finance.
+
+V2 change: each ticker is downloaded individually using a date window
+derived from the last stored date in the database (see database.get_last_stored_dates).
+Tickers that fail to download are logged and skipped rather than aborting the pipeline.
+"""
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
+from datetime import date, timedelta
+from typing import Any
 
 import pandas as pd
 import yfinance as yf
 
+logger = logging.getLogger(__name__)
+
+
+def fetch_company_info(tickers: Sequence[str]) -> dict[str, dict[str, Any]]:
+    """Fetch company metadata from yfinance for dim_company population.
+
+    Returns a dict mapping ticker → {company_name, sector, industry}.
+    Missing or rate-limited tickers return an empty inner dict gracefully.
+    """
+    info: dict[str, dict[str, Any]] = {}
+    for ticker in tickers:
+        try:
+            raw_info = yf.Ticker(ticker).info
+            info[ticker] = {
+                "company_name": raw_info.get("longName"),
+                "sector": raw_info.get("sector"),
+                "industry": raw_info.get("industry"),
+            }
+            logger.debug("Fetched company info for %s", ticker)
+        except Exception:
+            logger.warning("Could not fetch company info for %s — will store nulls", ticker)
+            info[ticker] = {}
+    return info
+
 
 def extract_stock_data(
     tickers: Sequence[str],
-    period: str,
-    interval: str,
-) -> pd.DataFrame:
-    """Download historical price data for the requested ticker symbols.
+    start_dates: dict[str, date],
+    lookback_days: int,
+    interval: str = "1d",
+) -> tuple[pd.DataFrame, list[str]]:
+    """Download price history for each ticker from its last stored date forward.
 
-    The returned DataFrame is the raw yfinance result. Transformation and
-    business rules are intentionally handled in ``transform.py``.
+    Args:
+        tickers: Ticker symbols to download.
+        start_dates: Maps ticker → last stored date from the database.
+            Tickers absent from this dict are downloaded from scratch using lookback_days.
+        lookback_days: Calendar days to look back for tickers with no stored data.
+        interval: yfinance interval string (default "1d").
+
+    Returns:
+        A tuple of (combined DataFrame with all downloaded rows, list of tickers that failed).
+        Partial failures are logged but do not raise — the pipeline continues with the
+        tickers that succeeded.
     """
-    normalized_tickers = [ticker.strip().upper() for ticker in tickers if ticker.strip()]
-    if not normalized_tickers:
-        raise ValueError("At least one ticker is required for extraction.")
+    normalized = [t.strip().upper() for t in tickers if t.strip()]
+    if not normalized:
+        raise ValueError("At least one ticker symbol is required.")
 
-    raw_data = yf.download(
-        tickers=normalized_tickers,
-        period=period,
-        interval=interval,
-        group_by="ticker",
-        auto_adjust=False,
-        progress=False,
-        threads=True,
-    )
+    today = date.today()
+    frames: list[pd.DataFrame] = []
+    failed: list[str] = []
 
-    if raw_data is None or raw_data.empty:
+    for ticker in normalized:
+        last_stored = start_dates.get(ticker)
+        if last_stored is not None:
+            # 2-day overlap buffer catches any late-arriving corrections
+            download_start = last_stored - timedelta(days=2)
+        else:
+            download_start = today - timedelta(days=lookback_days)
+
+        logger.info(
+            "Downloading %s | %s → %s", ticker, download_start.isoformat(), today.isoformat()
+        )
+        try:
+            raw = yf.download(
+                tickers=ticker,
+                start=download_start.strftime("%Y-%m-%d"),
+                end=today.strftime("%Y-%m-%d"),
+                interval=interval,
+                auto_adjust=False,
+                progress=False,
+            )
+        except Exception:
+            logger.exception("Download failed for %s — skipping ticker", ticker)
+            failed.append(ticker)
+            continue
+
+        if raw is None or raw.empty:
+            logger.warning("No data returned for %s — skipping ticker", ticker)
+            failed.append(ticker)
+            continue
+
+        raw = raw.copy()
+        # yfinance >= 0.2.x returns MultiIndex columns even for single-ticker
+        # downloads, e.g. ("Open", "AAPL"). Flatten to field names only so that
+        # adding the Ticker column doesn't corrupt the MultiIndex structure.
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        raw["Ticker"] = ticker
+        frames.append(raw)
+        logger.info("Downloaded %d rows for %s", len(raw), ticker)
+
+    if not frames:
         raise ValueError(
-            "No stock data was returned. Check the ticker symbols, date period, "
-            "and internet connection."
+            "No data was extracted for any ticker. "
+            "Check ticker symbols, date ranges, and internet connection."
         )
 
-    # Ensures each row has a Ticker column for consistent processing in later stages by adding a Ticker column when only one ticker is requested.
-    # yfinance uses flat columns when only one ticker is requested.
-    if not isinstance(raw_data.columns, pd.MultiIndex):
-        raw_data = raw_data.copy()
-        raw_data["Ticker"] = normalized_tickers[0]
+    combined = pd.concat(frames)
+    logger.info(
+        "Extraction complete — %d total rows | %d tickers succeeded | %d failed",
+        len(combined),
+        len(normalized) - len(failed),
+        len(failed),
+    )
+    if failed:
+        logger.warning("Failed tickers: %s", ", ".join(failed))
 
-    return raw_data
+    return combined, failed
